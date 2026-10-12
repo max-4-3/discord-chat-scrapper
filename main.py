@@ -177,6 +177,7 @@ class DiscordApiClient:
 
         return path.with_name(f"{capped_stem}{suffix}")
 
+
 class DiscordScraper:
     def __init__(
         self,
@@ -233,7 +234,7 @@ class DiscordScraper:
                         success = await self.api.download_media(file_url, dest_path)
 
                         if success:
-                            saved_attachments.append(str(dest_path))
+                            saved_attachments.append(str(dest_path.expanduser().resolve().absolute()))
                             media_downloaded_in_msg += 1
 
                             # Increment rule for media-only mode
