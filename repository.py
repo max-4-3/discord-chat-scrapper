@@ -96,12 +96,12 @@ class CsvSaveRepository(BaseSaveRepository[list[str]]):
         author = message_data.get("author") or {}
 
         result = [
-            message_data.get("id"),  # message_id
-            message_data.get("timestamp"),  # timestamp
-            author.get("id"),  # author_id
-            author.get("username"),  # author_name
-            message_data.get("content", ""),  # content
-            ";".join(attachment_paths),  # attachments
+            message_data.get("id"),             # message_id
+            message_data.get("timestamp"),      # timestamp
+            author.get("id"),                   # author_id
+            author.get("username"),             # author_name
+            message_data.get("content", ""),    # content
+            ";".join(attachment_paths),         # attachments
         ]
 
         return list(map(str, result))
@@ -115,9 +115,8 @@ class JsonSaveRepository(BaseSaveRepository[dict[str, JsonValue]]):
         if file_path.exists():
             with file_path.open("r", encoding="utf-8") as file:
                 loaded = json.load(file)
-                if not isinstance(loaded, list) or not all(
-                    map(lambda m: isinstance(m, dict), loaded)
-                ):
+                if not (isinstance(loaded, list) and
+                        all(map(lambda m: type(m) is dict, loaded))):
                     raise ValueError(f"Invalid JSON messages structure in {file_path}")
 
                 result = loaded

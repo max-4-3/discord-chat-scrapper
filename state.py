@@ -18,10 +18,8 @@ class StateManager:
 
     def load_state(self) -> ScraperState:
         try:
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                return ScraperState(
-                    oldest_message_id=json_load(f).get("oldest_message_id")
-                )
+            with self.state_file.open("r", encoding="utf-8") as f:
+                return ScraperState(oldest_message_id=json_load(f).get("oldest_message_id"))
         except Exception as e:
             logger.warning(f"Failed to load state file: {e}")
 
@@ -29,8 +27,8 @@ class StateManager:
 
     def save_state(self, state: ScraperState) -> None:
         try:
-            with open(self.state_file, "w", encoding="utf-8") as f:
-                json_dump(asdict(state), f)
+            with self.state_file.open("w", encoding="utf-8") as f:
+                json_dump(asdict(state), f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Failed to save state file: {e}")
 
