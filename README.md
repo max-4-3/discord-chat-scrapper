@@ -12,9 +12,21 @@ TOKEN=YOUR_TOKEN
 
 ## USAGE
 ```console
-uv run main.py -c <channel_id>
+uv run main.py <channel_id> {save_mode}
 ```
-You can also checkout `help`:
+
+for example:
+```console
+uv run main.py 900 json
+```
+
+
+this will save the chats from `900` (channel_id) saving any media encountered along the way in the subdir at `./output/` the media will have
+thier own subdir in `media` dir (i.e.: `./output/media/900/<media_item_will_save_here>`) and state + output will be saved under `./output/`
+dir as `state_900.json` and `discord_channel_900.json` (NOTE: json here is the output mode (2nd arg to main.py)).
+
+
+to know more about the options to change/configure pre-defined behaviour checkout `help`:
 ```console
 uv run main.py --help
 ```
