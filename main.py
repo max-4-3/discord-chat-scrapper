@@ -187,7 +187,6 @@ async def main():
     args = parse_arguments()
     env = load_env()
     token = str(env.get("token") or env["TOKEN"]).strip()
-    print(args)
 
     config = ScraperConfig(
         token=token,
