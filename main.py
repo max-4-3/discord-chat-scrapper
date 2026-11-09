@@ -2,7 +2,7 @@
 import argparse
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable
 
 from client import DiscordApiClient
 from env import load_env
@@ -18,12 +18,14 @@ class ScraperConfig:
     _MODES: set[str] = {"chats", "media", "both"}
 
     def __init__(
-        self, token: str, channel_id: str, mode: str, limit: int, output_dir: str
+        self, token: str, channel_id: str, mode: str, limit: int, output_dir: str, delay: float, ntasks: int,
     ):
         self.token = token
         self.channel_id = channel_id
         self.mode = mode.lower()
         self.limit = limit
+        self.ntasks = ntasks
+        self.delay = delay
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -32,6 +34,9 @@ class ScraperConfig:
 
 
 class DiscordScraper:
+    """This instance is by design not thread safe
+    To use it in multiple threads use different instances of this class"""
+
     def __init__(
         self,
         config: ScraperConfig,
@@ -44,112 +49,122 @@ class DiscordScraper:
         self.save_repo = repository
         self.state_manager = state_manager
 
+        self.batch_size = 100
+        self.processed_count = 0
+        self.state = self.state_manager.load_state()
+
+        self._lock = asyncio.Lock()
+        self._sem = asyncio.Semaphore(self.config.ntasks)
+
+
+    async def _bounded_call[T](self, call: Awaitable[T]) -> T:
+        async with self._sem:
+            return await call
+
+    async def set_state(self, message_id: int | str) -> None:
+        if not (type(message_id) is int and message_id > 0
+                or type(message_id) is str and message_id.strip()):
+            return
+
+        async with self._lock:
+            self.state.oldest_message_id = int(message_id)
+            self.state_manager.save_state(self.state)
+
+    async def processed(self, count: int) -> None:
+        if count <= 0: return
+
+        async with self._lock:
+            self.processed_count += count
+
+    async def finished(self) -> bool:
+        async with self._lock:
+            return self.config.limit != -1 and self.processed_count >= self.config.limit
+
+    async def process_attachment(self,
+                                 attachments: list[dict[str, str | int]],
+                                 media_dir: Path, message_id: str | int) -> list[str]:
+        saved_attachments = []
+        if await self.finished():
+            return saved_attachments
+
+        for att in attachments:
+            file_url = att.get("url")
+            if file_url is None or type(file_url) is not str:
+                continue
+
+            file_name = att.get("filename", "unknown_file")
+            dest_path = media_dir / f"{message_id}_{file_name}"
+
+            logger.info(f"Downloading attachment: {file_name}")
+            if await self.api.download_media(file_url, dest_path):
+                saved_attachments.append(str(dest_path.expanduser().resolve().absolute()))
+
+                # Increment rule for media-only mode
+                await self.processed(self.config.mode == "media")
+                if await self.finished():
+                    break
+
+        return saved_attachments
+
+    async def process_message(self, message: dict):
+        if await self.finished():
+            return
+
+        message_id = int(message["id"])
+        attachments = message.get("attachments", [])
+        has_media = len(attachments) > 0
+        has_text = bool(message.get("content", "").strip())
+
+        saved_attachments = []
+
+        # Handle media download if required by mode
+        if has_media and self.config.mode in {"media", "both"}:
+            media_dir = self.config.output_dir / "media" / self.config.channel_id
+            saved_attachments.extend(await self.process_attachment(attachments, media_dir, message_id))
+
+        media_downloaded = len(saved_attachments) > 0
+
+        # if we are saving only media and msg don't have any then we should skip
+        if not (self.config.mode == "media" and not media_downloaded):
+            self.save_repo.append(message, saved_attachments)
+
+        if self.config.mode == "chats" and has_text:
+            await self.processed(1)
+        elif self.config.mode == "media" and media_downloaded:
+            await self.processed(1)
+        elif self.config.mode == "both":
+            await self.processed(has_text or media_downloaded)
+
     async def run(self) -> None:
-        logger.info(
-            f"Starting scraper for channel ID: {self.config.channel_id} in mode: [{self.config.mode}]"
-        )
+        logger.info(f"Starting scraper for channel ID: {self.config.channel_id} in mode: [{self.config.mode}]"
+                    f"\nScraping state: {self.state}")
 
-        state = self.state_manager.load_state()
-        processed_count = 0
-        batch_size = 100
+        if await self.finished():
+            logger.info(f"Reached configured limit of {self.config.limit} items. Stopping.")
 
-        logger.debug(f"Scraping state: {state}")
-        while True:
-            if self.config.limit != -1 and processed_count >= self.config.limit:
-                logger.info(
-                    f"Reached configured limit of {self.config.limit} items. Stopping."
-                )
-                break
-
-            messages = await self.api.fetch_messages(
+        while not await self.finished():
+            messages = list(await self.api.fetch_messages(
                 channel_id=self.config.channel_id,
-                before=state.oldest_message_id,
-                limit=batch_size,
-            )
+                before=self.state.oldest_message_id,
+                limit=self.batch_size,
+            ))
 
             if not messages:
                 logger.info("No more messages found in channel history.")
                 break
 
-            oldest_id: Optional[str | int] = None
-            # Process messages chronologically (Discord returns newest first in pagination)
-            for msg in messages:
-                if self.config.limit != -1 and processed_count >= self.config.limit:
-                    break
+            # process messages in parallel
+            await asyncio.gather(*map(lambda m: self._bounded_call(self.process_message(m)), messages))
 
-                oldest_id = int(msg["id"])
-                attachments = msg.get("attachments", [])
-                has_media = len(attachments) > 0
-                has_text = bool(msg.get("content", "").strip())
-
-                saved_attachments = []
-                media_downloaded_in_msg = 0
-
-                # Handle media download if required by mode
-                if has_media and self.config.mode in {"media", "both"}:
-                    media_dir = (
-                        self.config.output_dir / "media" / self.config.channel_id
-                    )
-
-                    for att in attachments:
-                        file_name = att.get("filename", "unknown_file")
-                        file_url = att.get("url")
-                        dest_path = media_dir / f"{msg['id']}_{file_name}"
-
-                        logger.info(f"Downloading attachment: {file_name}")
-                        success = await self.api.download_media(file_url, dest_path)
-
-                        if success:
-                            saved_attachments.append(
-                                str(dest_path.expanduser().resolve().absolute())
-                            )
-                            media_downloaded_in_msg += 1
-
-                            # Increment rule for media-only mode
-                            if self.config.mode == "media":
-                                processed_count += 1
-                                if (
-                                    self.config.limit != -1
-                                    and processed_count >= self.config.limit
-                                ):
-                                    break
-
-                # Save record to repository based on mode criteria
-                should_save_chat = self.config.mode in {"chats", "both"} and (
-                    has_text or self.config.mode == "chats"
-                )
-                should_save_media_record = (
-                    self.config.mode == "media" and media_downloaded_in_msg > 0
-                )
-
-                if should_save_chat or should_save_media_record:
-                    self.save_repo.append(msg, saved_attachments)
-
-                # Increment counters according to user specifications:
-                # - Chats only: inc when each message received
-                # - Both: inc when msg is either a message or media
-                if self.config.mode == "chats":
-                    processed_count += 1
-                elif self.config.mode == "both":
-                    if has_text or media_downloaded_in_msg > 0:
-                        processed_count += 1
-
-            # Save progress state after each batch chunk
-            if (
-                type(oldest_id) is int
-                and oldest_id > 0
-                or type(oldest_id) is str
-                and oldest_id.strip()
-            ):
-                state.oldest_message_id = int(oldest_id)
-                self.state_manager.save_state(state)
+            # Discord message IDs are time-ordered snowflakes, meaning smaller numbers always represent older messages
+            await self.set_state(min(map(
+                lambda m: int(m["id"]),
+                filter(lambda m: bool((t := type(m.get("id"))) and t in (int, str)), messages))))
 
             # Avoid hitting API limits too fast
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.config.delay)
 
-        logger.info(
-            f"Scraping completed successfully. Total processed count: {processed_count}"
-        )
+        logger.info(f"Scraping completed successfully. Total processed count: {self.processed_count}")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -164,6 +179,16 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Output mode to use when storing info",
     )
 
+    parser.add_argument(
+        "--ntasks",
+        type=int, default=10,
+        help="Number of simultaneous tasks processed in parallel"
+    )
+    parser.add_argument(
+        "--delay",
+        type=float, default=0.5,
+        help="Delay between each requests (in seconds)"
+    )
     parser.add_argument(
         "--limit",
         type=int, default=-1,
@@ -194,6 +219,8 @@ async def main():
         mode=args.mode,
         limit=args.limit,
         output_dir=args.output,
+        delay=args.delay,
+        ntasks=args.ntasks,
     )
 
     config.output_dir.mkdir(exist_ok=True, parents=True)
@@ -222,6 +249,7 @@ async def main():
         logger.info("Scraping interrupted by user. Progress state saved.")
     except Exception as e:
         logger.error(f"Fatal error during execution: {e}")
+        raise
 
 
 if __name__ == "__main__":
