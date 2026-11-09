@@ -1,5 +1,6 @@
 from pathlib import Path
 
+
 def parse_env(env_path: Path) -> dict:
     """parse the `env_path` file and loads it a dict"""
 
