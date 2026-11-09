@@ -99,7 +99,6 @@ class DiscordScraper:
             if await self.api.download_media(file_url, dest_path):
                 saved_attachments.append(str(dest_path.expanduser().resolve().absolute()))
 
-                # Increment rule for media-only mode
                 await self.processed(self.config.mode == "media")
                 if await self.finished():
                     break
@@ -136,8 +135,8 @@ class DiscordScraper:
             await self.processed(has_text or media_downloaded)
 
     async def run(self) -> None:
-        logger.info(f"Starting scraper for channel ID: {self.config.channel_id} in mode: [{self.config.mode}]"
-                    f"\nScraping state: {self.state}")
+        logger.info(f"Starting scraper for channel ID: {self.config.channel_id} in mode: [{self.config.mode}] "
+                    f"state: {self.state}")
 
         if await self.finished():
             logger.info(f"Reached configured limit of {self.config.limit} items. Stopping.")
